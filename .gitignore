@@ -1,0 +1,4 @@
+.DS_Store
+# dist // committing dist to make this usable as a git+https module without a separate npm publish
+node_modules
+secrets.txt
