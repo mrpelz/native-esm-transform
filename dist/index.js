@@ -3,10 +3,10 @@ import { init, parse } from 'es-module-lexer';
 import { dirname, join, relative, resolve } from 'path';
 import { mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { pathToFileURL } from 'url';
-const files = new Map();
+const handled = new Set();
 let config;
 function resolveConfig(cwd, input) {
-    const { entryPaths: _entryPaths, rootMap: _rootMap, write } = input;
+    const { entryPaths: _entryPaths, rootMap: _rootMap } = input;
     const rootMap = Object.entries(_rootMap).map(([srcRoot, distRoot]) => ({
         dist: resolve(cwd, distRoot),
         src: resolve(cwd, srcRoot),
@@ -17,7 +17,6 @@ function resolveConfig(cwd, input) {
     return {
         entryPaths,
         rootMap,
-        write,
     };
 }
 function isBareIdentifier(identifier) {
@@ -47,46 +46,28 @@ const rewriteImportPath = async (src, oldImportIdentifier, newImportIdentifier) 
     const { e, s } = importSpecifier;
     return `${src.slice(0, s)}${newImportIdentifier}${src.slice(e)}`;
 };
-async function handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath) {
-    const { write } = config;
+async function handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath, src) {
     const absoluteSrcDir = dirname(absoluteSrcPath);
     const absoluteDistDir = dirname(absoluteDistPath);
     const { n: importIdentifier } = importSpecifier;
     if (!importIdentifier)
-        return;
+        return null;
     const bare = isBareIdentifier(importIdentifier);
     const absoluteImportSrcPath = bare
         ? await resolveBareImportPath(importIdentifier, absoluteSrcPath)
         : resolve(absoluteSrcDir, importIdentifier);
     if (!absoluteImportSrcPath)
-        return;
+        return null;
     // eslint-disable-next-line @typescript-eslint/no-use-before-define
     const absoluteImportDistPath = await handleFile(absoluteImportSrcPath);
     const resolvedImportIdentifier = (() => {
         const path = relative(absoluteDistDir, absoluteImportDistPath);
         return isBareIdentifier(path) ? `./${path}` : path;
     })();
-    if (!write) {
-        // eslint-disable-next-line no-console
-        console.log('IMPORT', {
-            absoluteDistDir,
-            absoluteDistPath,
-            absoluteImportDistPath,
-            absoluteImportSrcPath,
-            absoluteSrcDir,
-            absoluteSrcPath,
-            bare,
-            importIdentifier,
-            resolvedImportIdentifier,
-        });
-    }
-    const src = files.get(absoluteDistPath);
-    if (!src)
-        return;
-    files.set(absoluteDistPath, await rewriteImportPath(src, importIdentifier, resolvedImportIdentifier));
+    return rewriteImportPath(src, importIdentifier, resolvedImportIdentifier);
 }
 async function handleFile(absoluteSrcPath) {
-    const { rootMap, write } = config;
+    const { rootMap } = config;
     const matchingRoot = rootMap.find(({ src }) => absoluteSrcPath.startsWith(src));
     if (!matchingRoot) {
         throw new Error(`no matching root for this src file (${absoluteSrcPath})`);
@@ -94,38 +75,23 @@ async function handleFile(absoluteSrcPath) {
     const { dist: distRoot, src: srcRoot } = matchingRoot;
     const relativeSrcPath = relative(srcRoot, absoluteSrcPath);
     const absoluteDistPath = resolve(distRoot, relativeSrcPath);
-    if (files.has(absoluteDistPath))
+    if (handled.has(absoluteDistPath))
         return absoluteDistPath;
     const stats = await stat(absoluteSrcPath);
     if (!stats.isFile()) {
         throw new Error(`cannot read src file (${absoluteSrcPath})`);
     }
-    const initialSrc = await readFile(absoluteSrcPath, { encoding: 'utf8' });
-    files.set(absoluteDistPath, initialSrc);
-    const [imports] = parse(initialSrc);
+    let src = await readFile(absoluteSrcPath, { encoding: 'utf8' });
+    handled.add(absoluteDistPath);
+    const [imports] = parse(src);
     for (const importSpecifier of imports) {
         // eslint-disable-next-line no-await-in-loop
-        await handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath);
+        const amendedSrc = await handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath, src);
+        src = amendedSrc || src;
     }
     const absoluteDistDir = dirname(absoluteDistPath);
-    if (!write) {
-        // eslint-disable-next-line no-console
-        console.log('FILE', {
-            absoluteDistDir,
-            absoluteDistPath,
-            absoluteSrcPath,
-            distRoot,
-            relativeSrcPath,
-            srcRoot,
-        });
-    }
-    if (!write)
-        return absoluteDistPath;
-    const finalSrc = files.get(absoluteDistPath);
-    if (!finalSrc)
-        return absoluteDistPath;
     await mkdir(absoluteDistDir, { recursive: true });
-    await writeFile(absoluteDistPath, finalSrc);
+    await writeFile(absoluteDistPath, src);
     return absoluteDistPath;
 }
 (async () => {
@@ -139,16 +105,11 @@ async function handleFile(absoluteSrcPath) {
             return {
                 entryPaths: [],
                 rootMap: {},
-                write: false,
             };
         }
     })();
     config = resolveConfig(cwd, _config);
-    const { entryPaths, write } = config;
-    if (!write) {
-        // eslint-disable-next-line no-console
-        console.log('CONFIG', config);
-    }
+    const { entryPaths } = config;
     for (const entryPath of entryPaths) {
         handleFile(entryPath);
     }

@@ -5,8 +5,6 @@ import { dirname, join, relative, resolve } from 'path';
 import { mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { pathToFileURL } from 'url';
 
-type Files = Map<string, string>;
-
 type RootMap = {
   dist: string;
   src: string;
@@ -15,21 +13,19 @@ type RootMap = {
 type Config = {
   entryPaths: string[];
   rootMap: Record<string, string>;
-  write: boolean;
 };
 
 type ResolvedConfig = {
   entryPaths: string[];
   rootMap: RootMap;
-  write: boolean;
 };
 
-const files: Files = new Map();
+const handled = new Set<string>();
 
 let config: ResolvedConfig | undefined;
 
 function resolveConfig(cwd: string, input: Config) {
-  const { entryPaths: _entryPaths, rootMap: _rootMap, write } = input;
+  const { entryPaths: _entryPaths, rootMap: _rootMap } = input;
 
   const rootMap = Object.entries(_rootMap).map(([srcRoot, distRoot]) => ({
     dist: resolve(cwd, distRoot),
@@ -45,7 +41,6 @@ function resolveConfig(cwd: string, input: Config) {
   return {
     entryPaths,
     rootMap,
-    write,
   };
 }
 
@@ -89,22 +84,21 @@ const rewriteImportPath = async (
 async function handleImport(
   importSpecifier: ImportSpecifier,
   absoluteSrcPath: string,
-  absoluteDistPath: string
+  absoluteDistPath: string,
+  src: string
 ) {
-  const { write } = config as ResolvedConfig;
-
   const absoluteSrcDir = dirname(absoluteSrcPath);
   const absoluteDistDir = dirname(absoluteDistPath);
 
   const { n: importIdentifier } = importSpecifier;
-  if (!importIdentifier) return;
+  if (!importIdentifier) return null;
 
   const bare = isBareIdentifier(importIdentifier);
 
   const absoluteImportSrcPath = bare
     ? await resolveBareImportPath(importIdentifier, absoluteSrcPath)
     : resolve(absoluteSrcDir, importIdentifier);
-  if (!absoluteImportSrcPath) return;
+  if (!absoluteImportSrcPath) return null;
 
   // eslint-disable-next-line @typescript-eslint/no-use-before-define
   const absoluteImportDistPath = await handleFile(absoluteImportSrcPath);
@@ -115,32 +109,11 @@ async function handleImport(
     return isBareIdentifier(path) ? `./${path}` : path;
   })();
 
-  if (!write) {
-    // eslint-disable-next-line no-console
-    console.log('IMPORT', {
-      absoluteDistDir,
-      absoluteDistPath,
-      absoluteImportDistPath,
-      absoluteImportSrcPath,
-      absoluteSrcDir,
-      absoluteSrcPath,
-      bare,
-      importIdentifier,
-      resolvedImportIdentifier,
-    });
-  }
-
-  const src = files.get(absoluteDistPath);
-  if (!src) return;
-
-  files.set(
-    absoluteDistPath,
-    await rewriteImportPath(src, importIdentifier, resolvedImportIdentifier)
-  );
+  return rewriteImportPath(src, importIdentifier, resolvedImportIdentifier);
 }
 
 async function handleFile(absoluteSrcPath: string) {
-  const { rootMap, write } = config as ResolvedConfig;
+  const { rootMap } = config as ResolvedConfig;
 
   const matchingRoot = rootMap.find(({ src }) =>
     absoluteSrcPath.startsWith(src)
@@ -154,44 +127,34 @@ async function handleFile(absoluteSrcPath: string) {
   const relativeSrcPath = relative(srcRoot, absoluteSrcPath);
   const absoluteDistPath = resolve(distRoot, relativeSrcPath);
 
-  if (files.has(absoluteDistPath)) return absoluteDistPath;
+  if (handled.has(absoluteDistPath)) return absoluteDistPath;
 
   const stats = await stat(absoluteSrcPath);
   if (!stats.isFile()) {
     throw new Error(`cannot read src file (${absoluteSrcPath})`);
   }
 
-  const initialSrc = await readFile(absoluteSrcPath, { encoding: 'utf8' });
-  files.set(absoluteDistPath, initialSrc);
+  let src = await readFile(absoluteSrcPath, { encoding: 'utf8' });
+  handled.add(absoluteDistPath);
 
-  const [imports] = parse(initialSrc);
+  const [imports] = parse(src);
 
   for (const importSpecifier of imports) {
     // eslint-disable-next-line no-await-in-loop
-    await handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath);
+    const amendedSrc = await handleImport(
+      importSpecifier,
+      absoluteSrcPath,
+      absoluteDistPath,
+      src
+    );
+
+    src = amendedSrc || src;
   }
 
   const absoluteDistDir = dirname(absoluteDistPath);
 
-  if (!write) {
-    // eslint-disable-next-line no-console
-    console.log('FILE', {
-      absoluteDistDir,
-      absoluteDistPath,
-      absoluteSrcPath,
-      distRoot,
-      relativeSrcPath,
-      srcRoot,
-    });
-  }
-
-  if (!write) return absoluteDistPath;
-
-  const finalSrc = files.get(absoluteDistPath);
-  if (!finalSrc) return absoluteDistPath;
-
   await mkdir(absoluteDistDir, { recursive: true });
-  await writeFile(absoluteDistPath, finalSrc);
+  await writeFile(absoluteDistPath, src);
 
   return absoluteDistPath;
 }
@@ -208,19 +171,12 @@ async function handleFile(absoluteSrcPath: string) {
       return {
         entryPaths: [] as string[],
         rootMap: {} as Record<string, string>,
-        write: false,
       };
     }
   })();
 
   config = resolveConfig(cwd, _config);
-
-  const { entryPaths, write } = config;
-
-  if (!write) {
-    // eslint-disable-next-line no-console
-    console.log('CONFIG', config);
-  }
+  const { entryPaths } = config;
 
   for (const entryPath of entryPaths) {
     handleFile(entryPath);
