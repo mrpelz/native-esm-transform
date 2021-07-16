@@ -1,7 +1,7 @@
 #!/usr/bin/env node --use_strict --experimental-modules --experimental-import-meta-resolve
 
-import { ImportSpecifier, init, parse } from 'es-module-lexer';
-import { dirname, join, relative, resolve } from 'path';
+import { ImportSpecifier, parse as esParse, init } from 'es-module-lexer';
+import { dirname, join, parse, relative, resolve } from 'path';
 import { mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { pathToFileURL } from 'url';
 
@@ -20,7 +20,14 @@ type ResolvedConfig = {
   rootMap: RootMap;
 };
 
+type PackageJson = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  content: any;
+  path: string | null;
+};
+
 const handled = new Set<string>();
+const packageJsons = new Map<string, PackageJson>();
 
 let config: ResolvedConfig | undefined;
 
@@ -52,26 +59,164 @@ function isBareIdentifier(identifier: string) {
   return true;
 }
 
-const resolveBareImportPath = async (importIdentifier: string, cdw: string) => {
-  const cwdUrl = pathToFileURL(cdw).href;
+async function getPackageJson(absoluteSrcPath: string) {
+  const { rootMap } = config as ResolvedConfig;
 
-  const targetPath = new URL(
+  const packageJsonPath = await (async () => {
+    let searchDir = dirname(absoluteSrcPath);
+
+    do {
+      const path = resolve(searchDir, 'package.json');
+
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const stats = await stat(path);
+        if (stats.isFile()) return path;
+      } catch {
+        // noop
+      }
+
+      searchDir = resolve(searchDir, '../');
+      // eslint-disable-next-line no-loop-func
+    } while (!rootMap.find(({ src }) => src === searchDir));
+
+    return null;
+  })();
+
+  if (!packageJsonPath) {
+    return {
+      content: {},
+      path: null,
+    };
+  }
+
+  const packageJsonSrc = await readFile(packageJsonPath, { encoding: 'utf8' });
+  const packageJson = (() => {
+    try {
+      return JSON.parse(packageJsonSrc);
+    } catch {
+      return {
+        content: {},
+        path: packageJsonPath,
+      };
+    }
+  })();
+
+  return {
+    content: packageJson,
+    path: packageJsonPath,
+  };
+}
+
+function getBundleAlternative(
+  packageJson: PackageJson,
+  absoluteImportPath: string
+) {
+  const { content, path } = packageJson;
+  if (!path || !content) return null;
+
+  const absolutePackagePath = dirname(path);
+
+  const { browser, main, module } = content || {};
+  if (!main) return null;
+
+  const absoluteMainPath = resolve(absolutePackagePath, main);
+
+  const importIsMainEntry = (() => {
+    try {
+      const { dir: importDir, name: importName } = parse(absoluteImportPath);
+      const importBase = join(importDir, importName);
+
+      const { ext, dir: mainDir, name: mainName } = parse(absoluteMainPath);
+      const mainBase = join(mainDir, mainName);
+
+      if (!['.js', '.mjs'].includes(ext)) return false;
+      if (importBase !== mainBase) return false;
+    } catch {
+      return false;
+    }
+
+    return true;
+  })();
+
+  const absoluteModulePath = module
+    ? resolve(absolutePackagePath, module)
+    : null;
+
+  const absoluteBrowserPath = (() => {
+    if (importIsMainEntry && typeof browser === 'string') {
+      const resolved = resolve(absolutePackagePath, browser);
+      return resolved;
+    }
+
+    if (typeof browser !== 'object') return null;
+
+    if (absoluteModulePath) {
+      for (const [key, value] of Object.entries(browser)) {
+        const resolvedKey = resolve(absolutePackagePath, key);
+        if (resolvedKey !== absoluteModulePath) continue;
+        if (typeof value !== 'string') continue;
+
+        const resolvedValue = resolve(absolutePackagePath, value);
+        return resolvedValue;
+      }
+    }
+
+    for (const [key, value] of Object.entries(browser)) {
+      const resolvedKey = resolve(absolutePackagePath, key);
+      if (resolvedKey !== absoluteImportPath) continue;
+      if (typeof value !== 'string') continue;
+
+      const resolvedValue = resolve(absolutePackagePath, value);
+      return resolvedValue;
+    }
+
+    return null;
+  })();
+
+  return absoluteBrowserPath || absoluteModulePath;
+}
+
+async function resolveBareImportPath(
+  importIdentifier: string,
+  absoluteSrcPath: string
+) {
+  const absoluteSrcUrl = pathToFileURL(absoluteSrcPath).href;
+
+  const importUrl = new URL(
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore
-    await import.meta.resolve(importIdentifier, cwdUrl)
-  ).pathname;
+    await import.meta.resolve(importIdentifier, absoluteSrcUrl)
+  );
 
-  if (!targetPath.startsWith('/')) return null;
+  if (importUrl.protocol !== 'file:') return null;
 
-  return targetPath;
-};
+  const absoluteImportPath = importUrl.pathname;
+
+  const packageJson = await (async () => {
+    const cached = packageJsons.get(absoluteImportPath);
+    if (cached) return cached;
+
+    const live = await getPackageJson(absoluteImportPath);
+    packageJsons.set(absoluteImportPath, live);
+
+    return live;
+  })();
+
+  const absoluteBundleAlternative = getBundleAlternative(
+    packageJson,
+    absoluteImportPath
+  );
+
+  return absoluteBundleAlternative || absoluteImportPath;
+}
 
 const rewriteImportPath = async (
   src: string,
   oldImportIdentifier: string,
   newImportIdentifier: string
 ) => {
-  const [imports] = parse(src);
+  const [imports] = esParse(src);
 
   const importSpecifier = imports.find(({ n }) => n === oldImportIdentifier);
   if (!importSpecifier) return src;
@@ -119,7 +264,9 @@ async function handleFile(absoluteSrcPath: string) {
     absoluteSrcPath.startsWith(src)
   );
   if (!matchingRoot) {
-    throw new Error(`no matching root for this src file (${absoluteSrcPath})`);
+    throw new Error(
+      `\n\n\tno matching root for this src file (${absoluteSrcPath})\n\n`
+    );
   }
 
   const { dist: distRoot, src: srcRoot } = matchingRoot;
@@ -137,7 +284,13 @@ async function handleFile(absoluteSrcPath: string) {
   let src = await readFile(absoluteSrcPath, { encoding: 'utf8' });
   handled.add(absoluteDistPath);
 
-  const [imports] = parse(src);
+  const [imports, exports] = esParse(src);
+
+  if (!exports.length) {
+    throw new Error(
+      `\n\n\tfile (${absoluteSrcPath}) appears not to be an ES-module, breaking\n\n`
+    );
+  }
 
   for (const importSpecifier of imports) {
     // eslint-disable-next-line no-await-in-loop
