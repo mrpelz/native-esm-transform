@@ -284,13 +284,7 @@ async function handleFile(absoluteSrcPath: string) {
   let src = await readFile(absoluteSrcPath, { encoding: 'utf8' });
   handled.add(absoluteDistPath);
 
-  const [imports, exports] = esParse(src);
-
-  if (!exports.length) {
-    throw new Error(
-      `\n\n\tfile (${absoluteSrcPath}) appears not to be an ES-module, breaking\n\n`
-    );
-  }
+  const [imports] = esParse(src);
 
   for (const importSpecifier of imports) {
     // eslint-disable-next-line no-await-in-loop
