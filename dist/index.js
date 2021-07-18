@@ -1,7 +1,7 @@
 #!/usr/bin/env node --use_strict --experimental-modules --experimental-import-meta-resolve
 import { parse as esParse, init } from 'es-module-lexer';
+import { copyFile, mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { dirname, join, parse, relative, resolve } from 'path';
-import { mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { pathToFileURL } from 'url';
 const handled = new Set();
 const packageJsons = new Map();
@@ -190,16 +190,21 @@ async function handleFile(absoluteSrcPath) {
     const absoluteDistPath = resolve(distRoot, relativeSrcPath);
     if (handled.has(absoluteDistPath))
         return absoluteDistPath;
-    const stats = await stat(absoluteSrcPath);
-    if (!stats.isFile()) {
-        throw new Error(`cannot read src file (${absoluteSrcPath})`);
-    }
-    let src = await readFile(absoluteSrcPath, { encoding: 'utf8' });
+    let src = await (async () => {
+        try {
+            const stats = await stat(absoluteSrcPath);
+            if (!stats.isFile()) {
+                throw new Error(`cannot read src file (${absoluteSrcPath})`);
+            }
+            const result = await readFile(absoluteSrcPath, { encoding: 'utf8' });
+            return result;
+        }
+        catch (error) {
+            throw new Error(`error reading file: ${error}`);
+        }
+    })();
     handled.add(absoluteDistPath);
-    const [imports, exports] = esParse(src);
-    if (!exports.length) {
-        throw new Error(`\n\n\tfile (${absoluteSrcPath}) appears not to be an ES-module, breaking\n\n`);
-    }
+    const [imports] = esParse(src);
     for (const importSpecifier of imports) {
         // eslint-disable-next-line no-await-in-loop
         const amendedSrc = await handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath, src);
@@ -208,6 +213,19 @@ async function handleFile(absoluteSrcPath) {
     const absoluteDistDir = dirname(absoluteDistPath);
     await mkdir(absoluteDistDir, { recursive: true });
     await writeFile(absoluteDistPath, src);
+    await (async () => {
+        try {
+            const srcPath = `${absoluteSrcPath}.map`;
+            const distPath = `${absoluteDistPath}.map`;
+            const stats = await stat(srcPath);
+            if (stats.isFile()) {
+                await copyFile(srcPath, distPath);
+            }
+        }
+        catch {
+            // noop
+        }
+    })();
     return absoluteDistPath;
 }
 (async () => {
