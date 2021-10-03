@@ -1,4 +1,4 @@
-#!/usr/bin/env node --use_strict --experimental-modules --experimental-import-meta-resolve
+#!/usr/bin/env -S node --use_strict --experimental-modules --experimental-import-meta-resolve
 import { parse as esParse, init } from 'es-module-lexer';
 import { copyFile, mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { dirname, join, parse, relative, resolve } from 'path';
