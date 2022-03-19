@@ -179,8 +179,11 @@ async function handleImport(importSpecifier, absoluteSrcPath, absoluteDistPath, 
     })();
     return rewriteImportPath(src, importIdentifier, resolvedImportIdentifier);
 }
-async function handleFile(absoluteSrcPath) {
+async function handleFile(absoluteSrcPathRaw) {
     const { rootMap } = config;
+    const absoluteSrcPath = absoluteSrcPathRaw.toLowerCase().endsWith('.js')
+        ? absoluteSrcPathRaw
+        : `${absoluteSrcPathRaw}.js`;
     const matchingRoot = rootMap.find(({ src }) => absoluteSrcPath.startsWith(src));
     if (!matchingRoot) {
         throw new Error(`\n\n\tno matching root for this src file (${absoluteSrcPath})\n\n`);

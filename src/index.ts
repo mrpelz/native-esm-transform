@@ -257,8 +257,12 @@ async function handleImport(
   return rewriteImportPath(src, importIdentifier, resolvedImportIdentifier);
 }
 
-async function handleFile(absoluteSrcPath: string) {
+async function handleFile(absoluteSrcPathRaw: string) {
   const { rootMap } = config as ResolvedConfig;
+
+  const absoluteSrcPath = absoluteSrcPathRaw.toLowerCase().endsWith('.js')
+    ? absoluteSrcPathRaw
+    : `${absoluteSrcPathRaw}.js`;
 
   const matchingRoot = rootMap.find(({ src }) =>
     absoluteSrcPath.startsWith(src)
